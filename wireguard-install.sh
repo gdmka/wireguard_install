@@ -450,17 +450,70 @@ function listClients() {
 		exit 1
 	fi
 
-	# Print "name (PublicKey)" for each client, pairing each "### Client <name>"
-	# comment with the PublicKey found in the following [Peer] block.
+	# Print "name (PublicKey, AllowedIPs)" for each client, pairing each
+	# "### Client <name>" comment with the PublicKey and AllowedIPs found
+	# in the following [Peer] block.
 	awk '
 		/^### Client / { name = $3 }
 		/^PublicKey = / && name != "" {
 			key = $0
 			sub(/^PublicKey = /, "", key)
-			print name " (" key ")"
+		}
+		/^AllowedIPs = / && name != "" {
+			ips = $0
+			sub(/^AllowedIPs = /, "", ips)
+			print name " (" key ", " ips ")"
 			name = ""
 		}
 	' "/etc/wireguard/${SERVER_WG_NIC}.conf" | nl -s ') '
+}
+
+function showStatus() {
+	if ! command -v wg &>/dev/null; then
+		echo ""
+		echo "WireGuard tools ('wg') are not installed."
+		exit 1
+	fi
+
+	WG_SHOW_OUTPUT=$(wg show "${SERVER_WG_NIC}" 2>/dev/null)
+
+	if [[ -z ${WG_SHOW_OUTPUT} ]]; then
+		echo ""
+		echo "No WireGuard status available. Is the VPN running?"
+		exit 1
+	fi
+
+	# For each "peer: <pubkey>" line, look up the client name matching that
+	# PublicKey in the server config (paired with the preceding "### Client <name>"
+	# comment, same convention as listClients()) and print it alongside the key.
+	echo "${WG_SHOW_OUTPUT}" | awk -v conf="/etc/wireguard/${SERVER_WG_NIC}.conf" '
+		BEGIN {
+			name = ""
+			while ((getline line < conf) > 0) {
+				if (line ~ /^### Client /) {
+					sub(/^### Client /, "", line)
+					name = line
+				} else if (line ~ /^PublicKey = / && name != "") {
+					key = line
+					sub(/^PublicKey = /, "", key)
+					keyToName[key] = name
+					name = ""
+				}
+			}
+			close(conf)
+		}
+		/^peer: / {
+			key = $0
+			sub(/^peer: /, "", key)
+			if (key in keyToName) {
+				print "peer: " key " (name: " keyToName[key] ")"
+			} else {
+				print $0
+			}
+			next
+		}
+		{ print }
+	'
 }
 
 function revokeClient() {
@@ -574,11 +627,12 @@ function manageMenu() {
 	echo "What do you want to do?"
 	echo "   1) Add a new user"
 	echo "   2) List all users"
-	echo "   3) Revoke existing user"
-	echo "   4) Uninstall WireGuard"
-	echo "   5) Exit"
-	until [[ ${MENU_OPTION} =~ ^[1-5]$ ]]; do
-		read -rp "Select an option [1-5]: " MENU_OPTION
+	echo "   3) Show WireGuard status (wg show)"
+	echo "   4) Revoke existing user"
+	echo "   5) Uninstall WireGuard"
+	echo "   6) Exit"
+	until [[ ${MENU_OPTION} =~ ^[1-6]$ ]]; do
+		read -rp "Select an option [1-6]: " MENU_OPTION
 	done
 	case "${MENU_OPTION}" in
 	1)
@@ -588,12 +642,15 @@ function manageMenu() {
 		listClients
 		;;
 	3)
-		revokeClient
+		showStatus
 		;;
 	4)
-		uninstallWg
+		revokeClient
 		;;
 	5)
+		uninstallWg
+		;;
+	6)
 		exit 0
 		;;
 	esac
